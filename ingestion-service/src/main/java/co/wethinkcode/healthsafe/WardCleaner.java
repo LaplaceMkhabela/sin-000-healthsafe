@@ -172,7 +172,7 @@ public final class WardCleaner {
     }
 
     /** Cleans one CSV row into a record, or {@code null} when the row has no usable ward id. */
-    public WardRecord cleanRow(String[] row) {
+    public static WardRecord cleanRow(String[] row) {
         String wardId = normalizeId(cell(row, 0));
         if (wardId == null) {
             return null;
