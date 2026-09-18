@@ -4,6 +4,9 @@ import io.javalin.Javalin;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,10 +15,21 @@ public class WardServiceApp {
 
     private static final Logger log = LoggerFactory.getLogger(WardServiceApp.class);
 
+    private static volatile WardCatalog catalog = new WardCatalog(List.of());
+
     public static void main(String[] args) {
         String ingestionUrl = System.getProperty("healthsafe.ingestion.url", "http://localhost:7030");
-        List<Ward> loaded = loadWards(ingestionUrl);
-        WardCatalog catalog = new WardCatalog(loaded);
+        int refreshSeconds = Integer.getInteger("healthsafe.ward.refresh.seconds", 10);
+
+        IngestionClient ingestion = new IngestionClient(ingestionUrl);
+        refresh(ingestion);
+
+        ScheduledExecutorService refresher = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "ward-refresh");
+            thread.setDaemon(true);
+            return thread;
+        });
+        refresher.scheduleWithFixedDelay(() -> refresh(ingestion), refreshSeconds, refreshSeconds, TimeUnit.SECONDS);
 
         Javalin app = Javalin.create().start(7031);
 
@@ -35,15 +49,16 @@ public class WardServiceApp {
 
         app.get("/departments", ctx -> ctx.json(catalog.departments()));
 
-        log.info("Ward service up on :7031 serving {} wards (ingestion at {})", catalog.all().size(), ingestionUrl);
+        log.info("Ward service up on :7031 (ingestion at {}, refresh every {}s)", ingestionUrl, refreshSeconds);
     }
 
-    private static List<Ward> loadWards(String ingestionUrl) {
+    /** Best-effort reload from ingestion-service; keeps serving the last good catalog on failure. */
+    static void refresh(IngestionClient ingestion) {
         try {
-            return new IngestionClient(ingestionUrl).fetchWards();
+            catalog = new WardCatalog(ingestion.fetchWards());
+            log.info("Loaded {} wards from ingestion-service", catalog.all().size());
         } catch (IngestionClient.IngestionUnavailableException e) {
-            log.warn("Could not load wards from ingestion-service at startup: {}", e.getMessage());
-            return List.of();
+            log.warn("Ward refresh failed (still serving {} cached wards): {}", catalog.all().size(), e.getMessage());
         }
     }
 }
