@@ -12,9 +12,13 @@ public class AlertLevelServiceApp {
     private static final Logger log = LoggerFactory.getLogger(AlertLevelServiceApp.class);
 
     public static void main(String[] args) {
-        AlertLevelStore store = new AlertLevelStore();
+        createApp(new AlertLevelStore()).start(7032);
+        log.info("Alert level service up on :7032");
+    }
 
-        Javalin app = Javalin.create().start(7032);
+    /** Builds the routes (without starting) so tests can drive the app on an ephemeral port. */
+    public static Javalin createApp(AlertLevelStore store) {
+        Javalin app = Javalin.create();
 
         app.get("/health", ctx -> ctx.result("OK"));
 
@@ -40,7 +44,7 @@ public class AlertLevelServiceApp {
             }
         });
 
-        log.info("Alert level service up on :7032");
+        return app;
     }
 
     public static class AlertLevelRequest {
