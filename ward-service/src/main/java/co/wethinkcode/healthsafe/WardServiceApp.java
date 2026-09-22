@@ -39,7 +39,7 @@ public class WardServiceApp {
             log.warn("Staffing topic subscription unavailable at startup (still serving wards): {}", e.getMessage());
         }
 
-        Javalin app = createApp(staffingUpdates).start(7031);
+        Javalin app = createApp(staffingUpdates, new ActiveMqEquipmentAlertPublisher()).start(7031);
 
         log.info("Ward service up on :7031 (ingestion at {}, refresh every {}s)", ingestionUrl, refreshSeconds);
     }
@@ -50,6 +50,16 @@ public class WardServiceApp {
      * on each request; staffing updates come from the given store.
      */
     public static Javalin createApp(StaffingUpdateStore updates) {
+        return createApp(updates, alert -> {
+            throw new ActiveMqEquipmentAlertPublisher.EquipmentPublishException("no equipment alert publisher", null);
+        });
+    }
+
+    /**
+     * Same as {@link #createApp(StaffingUpdateStore)} with an explicit
+     * equipment-failure queue publisher.
+     */
+    public static Javalin createApp(StaffingUpdateStore updates, EquipmentAlertPublisher equipment) {
         Javalin app = Javalin.create();
 
         app.get("/health", ctx -> ctx.result("OK"));
@@ -82,7 +92,45 @@ public class WardServiceApp {
             ctx.json(event);
         });
 
+        // Reports a critical equipment failure on a ward. The alert is
+        // delivered to equipment-failure-queue for guaranteed processing —
+        // a 202 means the queue accepted it, a 503 means it did not (retry).
+        app.post("/wards/{id}/equipment-failure", ctx -> {
+            String id = ctx.pathParam("id");
+            Ward ward = catalog.byId(id).orElse(null);
+            if (ward == null) {
+                ctx.status(404).json(Map.of("error", "unknown ward id: " + id));
+                return;
+            }
+            FailureReport report;
+            try {
+                report = ctx.bodyAsClass(FailureReport.class);
+            } catch (Exception e) {
+                ctx.status(400).json(Map.of("error", "request body must be JSON with a description"));
+                return;
+            }
+            if (report == null || report.description == null || report.description.isBlank()) {
+                ctx.status(400).json(Map.of("error", "missing required field: description"));
+                return;
+            }
+            EquipmentAlert alert = EquipmentAlert.report(ward, report.description.trim(), report.severity);
+            try {
+                equipment.publish(alert);
+            } catch (Exception e) {
+                log.warn("Equipment alert for ward {} not delivered (caller should retry): {}", id, e.getMessage());
+                ctx.status(503).json(Map.of("error", "equipment alert queue unreachable, retry later"));
+                return;
+            }
+            ctx.status(202).json(alert);
+        });
+
         return app;
+    }
+
+    /** JSON body of {@code POST /wards/{id}/equipment-failure}. */
+    public static class FailureReport {
+        public String description;
+        public String severity;
     }
 
     /** Test hook so endpoint tests can seed the ward list without HTTP. */
